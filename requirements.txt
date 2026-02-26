@@ -1,0 +1,6 @@
+whisperx>=3.1.1
+torch>=2.0.0
+torchaudio>=2.0.0
+tqdm>=4.65.0
+# diarization (optional – requires HuggingFace token)
+pyannote.audio>=3.1.0
