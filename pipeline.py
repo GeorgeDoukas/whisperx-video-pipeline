@@ -4,17 +4,20 @@
 Supports:
   - CPU-first, GPU optional
   - Windows & Linux
-  - Resume-safe checkpointing
+  - Resume-safe checkpointing with per-segment ASR progress
   - Progress-friendly output via tqdm
   - Greek language (and any other Whisper-supported language)
+  - English technical term preservation via initial prompt
   - Optional speaker diarization
   - Markdown dialog output (suitable for LLM summarisation)
   - SRT subtitle output
   - Chapter embedding into the output video
+  - Optional transcript summarisation via local LM Studio inference
 
 Usage example
 -------------
   python pipeline.py myvideo.mp4 --language el --embed-chapters
+  python pipeline.py myvideo.mp4 --language el --summarize --lm-studio-url http://localhost:1234/v1
 
 Run ``python pipeline.py --help`` for the full argument list.
 """
@@ -32,7 +35,8 @@ from src.chapters import DEFAULT_CHAPTER_INTERVAL, embed_chapters, generate_chap
 from src.checkpoint import Checkpoint
 from src.diarize import assign_speakers, diarize
 from src.export import write_markdown, write_srt
-from src.transcribe import align, load_model, transcribe
+from src.summarize import summarize_transcript, write_summary
+from src.transcribe import align, load_model, transcribe_chunked
 
 logger = logging.getLogger(__name__)
 
@@ -61,19 +65,22 @@ def _stage_audio(args: argparse.Namespace, checkpoint: Checkpoint) -> Path:
 def _stage_transcribe(
     args: argparse.Namespace, audio_path: Path, checkpoint: Checkpoint
 ) -> dict:
-    """Stage 2 – run WhisperX ASR."""
+    """Stage 2 – run WhisperX ASR with per-segment checkpointing."""
     if checkpoint.is_done("transcribe"):
         logger.info("Transcription loaded from checkpoint.")
         return checkpoint.get_stage_data("transcribe")
 
     model = load_model(args.model, args.device, args.compute_type)
     with tqdm(total=1, desc="Transcribing", unit="file") as pbar:
-        result = transcribe(
+        result = transcribe_chunked(
             model,
             audio_path,
             language=args.language,
             batch_size=args.batch_size,
             chunk_size=args.chunk_size,
+            checkpoint=checkpoint,
+            segment_minutes=args.segment_minutes,
+            initial_prompt=args.initial_prompt,
         )
         pbar.update(1)
     checkpoint.mark_done("transcribe", result)
@@ -132,8 +139,12 @@ def _stage_diarize(
 
 def _stage_export(
     args: argparse.Namespace, segments: list, checkpoint: Checkpoint
-) -> None:
-    """Stage 5 – write SRT and Markdown output files."""
+) -> Path:
+    """Stage 5 – write SRT and Markdown output files.
+
+    Returns the path to the generated Markdown file so downstream stages
+    (e.g. summarisation) can read it without reconstructing the path.
+    """
     stem = args.input.resolve().stem
     output_dir = args.output_dir.resolve()
     srt_path = output_dir / f"{stem}.srt"
@@ -147,6 +158,7 @@ def _stage_export(
 
     logger.info("SRT written:      %s", srt_path)
     logger.info("Markdown written: %s", md_path)
+    return md_path
 
 
 def _stage_embed_chapters(
@@ -169,6 +181,33 @@ def _stage_embed_chapters(
     logger.info("Chaptered video written: %s", chaptered_path)
 
 
+def _stage_summarize(
+    args: argparse.Namespace, md_path: Path, checkpoint: Checkpoint
+) -> None:
+    """Stage 7 – optional LLM summarisation via LM Studio."""
+    if not args.summarize:
+        return
+    if checkpoint.is_done("summarize"):
+        logger.info("Summary already generated, skipping.")
+        return
+
+    stem = args.input.resolve().stem
+    summary_path = args.output_dir.resolve() / f"{stem}.summary.md"
+
+    transcript = md_path.read_text(encoding="utf-8")
+    with tqdm(total=1, desc="Summarising", unit="file") as pbar:
+        summary = summarize_transcript(
+            transcript,
+            base_url=args.lm_studio_url,
+            model=args.lm_studio_model,
+        )
+        write_summary(summary, summary_path)
+        pbar.update(1)
+
+    checkpoint.mark_done("summarize", str(summary_path))
+    logger.info("Summary written: %s", summary_path)
+
+
 def run(args: argparse.Namespace) -> None:
     """Execute the full pipeline according to *args*."""
 
@@ -185,8 +224,9 @@ def run(args: argparse.Namespace) -> None:
     final_result = _stage_diarize(args, aligned_result, audio_path, checkpoint)
 
     segments: List = final_result.get("segments", [])
-    _stage_export(args, segments, checkpoint)
+    md_path = _stage_export(args, segments, checkpoint)
     _stage_embed_chapters(args, segments)
+    _stage_summarize(args, md_path, checkpoint)
 
     checkpoint.set("pipeline_complete", True)
     logger.info("Pipeline complete. Output directory: %s", output_dir)
@@ -241,7 +281,22 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=30,
         dest="chunk_size",
-        help="Audio chunk size in seconds",
+        help="WhisperX internal VAD chunk size in seconds",
+    )
+    parser.add_argument(
+        "--segment-minutes",
+        type=int,
+        default=10,
+        dest="segment_minutes",
+        help="Audio segment length in minutes for chunked transcription (resume granularity)",
+    )
+    parser.add_argument(
+        "--initial-prompt",
+        default=(
+            "Technical terms, software names, and English words should remain in English."
+        ),
+        dest="initial_prompt",
+        help="Initial prompt passed to Whisper to guide transcription style",
     )
     parser.add_argument(
         "--no-align",
@@ -297,6 +352,25 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_CHAPTER_INTERVAL,
         dest="chapter_interval",
         help="Chapter interval in seconds",
+    )
+
+    # Summarisation
+    parser.add_argument(
+        "--summarize",
+        action="store_true",
+        help="Generate a summary of the transcript using a local LM Studio model",
+    )
+    parser.add_argument(
+        "--lm-studio-url",
+        default="http://localhost:1234/v1",
+        dest="lm_studio_url",
+        help="Base URL of the LM Studio OpenAI-compatible API",
+    )
+    parser.add_argument(
+        "--lm-studio-model",
+        default="local-model",
+        dest="lm_studio_model",
+        help="Model name as configured in LM Studio",
     )
 
     return parser

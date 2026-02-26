@@ -4,3 +4,6 @@ torchaudio>=2.0.0
 tqdm>=4.65.0
 # diarization (optional – requires HuggingFace token)
 pyannote.audio>=3.1.0
+# summarisation via LM Studio (local LLM inference)
+langchain>=1.0.0
+langchain-openai>=1.0.0
