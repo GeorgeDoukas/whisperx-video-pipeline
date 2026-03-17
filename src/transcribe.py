@@ -49,8 +49,6 @@ def transcribe(
         "language": language,
         "chunk_size": chunk_size,
     }
-    if initial_prompt:
-        kwargs["initial_prompt"] = initial_prompt
     result: Dict[str, Any] = model.transcribe(audio, **kwargs)
     return result
 
@@ -116,8 +114,6 @@ def transcribe_chunked(
         "language": language,
         "chunk_size": chunk_size,
     }
-    if initial_prompt:
-        kwargs["initial_prompt"] = initial_prompt
 
     for i in range(n_segments):
         stage_key = f"transcribe_chunk_{i}"

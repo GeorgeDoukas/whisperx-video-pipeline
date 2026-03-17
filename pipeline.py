@@ -286,7 +286,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--segment-minutes",
         type=int,
-        default=10,
+        default=1,
         dest="segment_minutes",
         help="Audio segment length in minutes for chunked transcription (resume granularity)",
     )
@@ -388,7 +388,7 @@ def main() -> None:
 
     # Resolve defaults that depend on other arguments
     if args.output_dir is None:
-        args.output_dir = args.input.parent
+        args.output_dir = Path("./output") / args.input.stem
     if args.compute_type is None:
         args.compute_type = "int8" if args.device == "cpu" else "float16"
 
